@@ -31,7 +31,6 @@ bool commandexecute(char* command){
     char* ptr = strndup(command,posn);
     char* cp = ptr;
 
-
     char* args[MAXCMD+1];
     int i = 0;
     args[i++] = strtok(ptr," \t\n");
@@ -122,6 +121,7 @@ bool commandexecute(char* command){
 int main(){
     // The program can support command of max lenght MAXCMDLEN 
     char command[MAXCMDLEN];
+    char prevcommand[MAXCMDLEN];
 
     // shell Interface: OsConcepts$
     while(canRun){
@@ -129,11 +129,21 @@ int main(){
         fflush(stdout);
 
         if(fgets(command,MAXCMDLEN,stdin) != NULL){
+
             command[strcspn(command,"\n")] = '\0';
 
             if(strcmp(command,"\\q")==0 || strcmp(command,"exit")==0){
                 break;
             }
+
+            if(strcmp(command,"!!")==0){
+                strcpy(command,prevcommand);
+            }
+
+            strcpy(prevcommand,command);
+
+            char* havebgsymb = strchr(command,'&');
+            if(havebgsymb != NULL) *havebgsymb = '\0';
 
             pid_t cpid = fork();
 
@@ -145,20 +155,20 @@ int main(){
             if( cpid == 0){ // child process
                 commandexecute(command);
             }
+
             else{ // parent process
-                if(strchr(command,'&') == NULL){
+                if(havebgsymb == NULL){
                     int status;
                     pid_t r_wait = wait(&status);
                     if(status == EXIT_FAILURE){
                         fprintf(stderr,"Wrong commands or buffer overflow\n");
                     }
                 }
-            }
+            }   
         }else{
             fprintf(stderr,"Error in fgets\n");
             break;
         }
-
     }
 
 }
