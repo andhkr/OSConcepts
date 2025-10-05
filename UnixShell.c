@@ -25,8 +25,10 @@
 bool canRun = true;
 
 bool commandexecute(char* command){
-
+    // char* iterator = command;
+    
     size_t posn =  strcspn(command,"<>|");
+
     int cmdcnt = 0;
     char* ptr = strndup(command,posn);
     char* cp = ptr;
@@ -82,40 +84,149 @@ bool commandexecute(char* command){
         dup2(fd,STDOUT_FILENO);
     }
 
-    char* pipeposn = strchr(command,'|');
+    for(int i = 0;i<MAXCMD;++i){
+        if(args[i] != NULL){
+        }else break;
+    }
+    execvp(args[0],args);
+}
 
-    if( pipeposn != NULL){ // pipe communication
-        if(isOutputRedirected){
-            fprintf(stderr,"Error: you want piped communication but already output redirection given\n");
-            exit(EXIT_FAILURE);
-        }
+// PIPE COMMUNICATION
 
-        int pipefd[2];
+// close all unsed file descriptor
+// it is always benificial to release unsed descriptor
+// because kernel have limited resources and all are in use
+// demanding process will be blocked till release and it also help
+// process in detecting EOF on pipes or files as mentioned below
+void closeAllUnsedPipeFd(int pipelist[][2],int pipecount){
+    for(int i = 0;i<pipecount;++i){
+        close(pipelist[i][0]);
+        close(pipelist[i][1]);
+    }
+};
 
-        if(pipe(pipefd) == -1){
+void pipeStart(int cid,int pipelist[][2],char** argslist,int pipecount){
+    //setting output to pipe write end
+    dup2(pipelist[cid][1],STDOUT_FILENO);
+    // close all unsed file descriptor
+    closeAllUnsedPipeFd(pipelist,pipecount);
+    // execute command
+    commandexecute(argslist[cid]);
+}
+
+void pipeMid(int cid,int pipelist[][2],char** argslist,int pipecount){
+    // setting input to pipe of parent
+
+    dup2(pipelist[cid-1][0],STDIN_FILENO);
+    // setting output to next process
+    dup2(pipelist[cid][1],STDOUT_FILENO);
+
+    // close all unsed file descriptor
+    closeAllUnsedPipeFd(pipelist,pipecount);
+    //execute command
+    commandexecute(argslist[cid]);
+}
+
+void pipeEnd(int cid,int pipelist[][2],char** argslist,int pipecount){
+    // read from previous process
+    dup2(pipelist[cid-1][0],STDIN_FILENO);
+    close(pipelist[cid-1][1]);
+
+    // close all unsed file descriptor
+    closeAllUnsedPipeFd(pipelist,pipecount);
+    //execute command
+    commandexecute(argslist[cid]);
+}
+
+typedef struct PipeComDetails{
+    pid_t* cpids;
+    int pipecount;
+}PipeComDetails;
+
+PipeComDetails pipecommunication(char* command){
+    // number of pipes required
+    int pipecount = 0;
+    char* iterator = command;
+    while(*iterator){
+        if(*iterator == '|') pipecount++;
+        iterator++;
+    }
+
+    // pipe creation for each pair
+    int pipelist[pipecount][2];
+
+    for(int i = 0;i<pipecount;++i){
+        if(pipe(pipelist[i]) == -1){
             perror("pipe");
             exit(EXIT_FAILURE);
         }
-        
-        pid_t cpid = fork();
-        if(cpid == -1){
+    }
+
+    // command for each process
+    char* argslist[pipecount+1];
+    char* handle = strtok(command,"|");
+    int i = 0;
+    while(handle){
+        argslist[i++] = handle;
+        handle = strtok(NULL,"|");
+    }
+
+    pid_t* cpids = (pid_t*) malloc(sizeof(pid_t)*(pipecount+1));
+    int childId = 0;
+
+    // launch first process
+    cpids[childId] = fork();
+    if(cpids[childId] == -1){
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+
+    if(cpids[childId] == 0){ // child process;
+        pipeStart(childId,pipelist,argslist,pipecount);
+    }
+
+    // in between process
+    for(childId = 1; childId < pipecount; ++childId){
+        // launch  process
+        cpids[childId] = fork();
+        if(cpids[childId] == -1){
             perror("fork");
             exit(EXIT_FAILURE);
         }
-        
-        if(cpid == 0){ // child process
-            dup2(pipefd[0],STDIN_FILENO);
-            close(pipefd[1]);
-            ++pipeposn;
-            while(isspace(*pipeposn))++pipeposn;
-            commandexecute(strdup(pipeposn));
-        }else{ // parent process
-            dup2(pipefd[1],STDOUT_FILENO);
-            close(pipefd[0]);
+
+        if(cpids[childId] == 0){ // child process;
+            pipeMid(childId,pipelist,argslist,pipecount);
         }
-        
     }
-    execvp(args[0],args);
+
+    // launch last process
+    cpids[childId] = fork();
+    if(cpids[childId] == -1){
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+
+    if(cpids[childId] == 0){ // child process;
+        pipeEnd(childId,pipelist,argslist,pipecount);
+    }
+
+    // close all file descriptor by parent(my shell )
+    // because due to parent open file discriptor pipe 
+    // will not released back to os and last child process
+    // waiting for input will be blocked 
+    // but in reality all producer have produced and finished
+    // e.g ls | grep expr
+    // after producing list ls will exited , grep produce the result 
+    // but since pipe end is also referenced by shell it will not released
+    // and grep will be blocked and eventually shell will be blocked
+    for(int i = 0;i<pipecount;++i){
+        close(pipelist[i][0]);
+        close(pipelist[i][1]);
+    }
+
+    // return the child process ids so that parent can wait for each one to finish
+    PipeComDetails pDetails = {.cpids = cpids,.pipecount=pipecount};
+    return pDetails;
 }
 
 int main(){
@@ -140,31 +251,51 @@ int main(){
                 strcpy(command,prevcommand);
             }
 
+            // history feature;
             strcpy(prevcommand,command);
 
+            // background feature (currently for only one &)
             char* havebgsymb = strchr(command,'&');
             if(havebgsymb != NULL) *havebgsymb = '\0';
 
-            pid_t cpid = fork();
+            //pipe feature
+            char* havepipe = strchr(command,'|');
+            if(havepipe != NULL){
+                PipeComDetails pDetails = pipecommunication(command);
 
-            if(cpid == -1){
-                perror("fork");
-                exit(EXIT_FAILURE);
-            }
+                if(havebgsymb != NULL) continue; // no wait
 
-            if( cpid == 0){ // child process
-                commandexecute(command);
-            }
+                for(int i = 0;i<=pDetails.pipecount;++i){
 
-            else{ // parent process
-                if(havebgsymb == NULL){
-                    int status;
-                    pid_t r_wait = wait(&status);
-                    if(status == EXIT_FAILURE){
-                        fprintf(stderr,"Wrong commands or buffer overflow\n");
+                    int rstatus = 0;
+                    int r_pid = waitpid(pDetails.cpids[i],&rstatus,0);
+                    if(rstatus == EXIT_FAILURE){
+                        fprintf(stderr,"Input Given May be Not given as per rule\n");
+                        exit(EXIT_FAILURE);
                     }
                 }
-            }   
+            }else{ // without pipe normal commands
+            
+                pid_t cpid = fork();
+
+                if(cpid == -1){
+                    perror("fork");
+                    exit(EXIT_FAILURE);
+                }
+
+                if( cpid == 0){ // child process
+                    commandexecute(command);
+                }
+                else{ // parent process
+                    if(havebgsymb == NULL){
+                        int status;
+                        pid_t r_wait = wait(&status);
+                        if(status == EXIT_FAILURE){
+                            fprintf(stderr,"Wrong commands or buffer overflow\n");
+                        }
+                    }
+                }   
+            }
         }else{
             fprintf(stderr,"Error in fgets\n");
             break;
